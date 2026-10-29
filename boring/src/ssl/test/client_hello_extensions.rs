@@ -159,3 +159,42 @@ fn client_hello_padding_leaves_large_hellos_alone() {
     let padded = client_hello_with(|ssl| ssl.set_client_hello_padding(true));
     assert_eq!(types(&padded), types(&default));
 }
+
+/// Returns (aead id, payload length) of the GREASE ECH extension.
+fn ech_grease(body: &[u8]) -> Option<(u16, usize)> {
+    let (_, d) = extensions(body).into_iter().find(|(t, _)| *t == 0xfe0d)?;
+    // type(1) kdf(2) aead(2) config_id(1) enc<2> payload<2>
+    assert_eq!(d[0], 0, "outer ECH");
+    let aead = u16::from_be_bytes([d[3], d[4]]);
+    let enc_len = usize::from(u16::from_be_bytes([d[6], d[7]]));
+    let p = 8 + enc_len;
+    let payload_len = usize::from(u16::from_be_bytes([d[p], d[p + 1]]));
+    assert_eq!(d.len(), p + 2 + payload_len);
+    Some((aead, payload_len))
+}
+
+#[test]
+fn ech_grease_shape_is_configurable() {
+    let mut aeads = std::collections::BTreeSet::new();
+    for _ in 0..32 {
+        let hello = client_hello_with(|ssl| {
+            ssl.set_enable_ech_grease(true);
+            ssl.set_ech_grease_aeads(&[0x0001, 0x0003]).unwrap();
+            ssl.set_ech_grease_payload_len(240).unwrap();
+        });
+        let (aead, len) = ech_grease(&hello).unwrap();
+        assert_eq!(len, 240);
+        aeads.insert(aead);
+    }
+    // Both AEADs show up; the chance of missing one in 32 tries is 2^-31.
+    assert_eq!(aeads.into_iter().collect::<Vec<_>>(), vec![0x0001, 0x0003]);
+}
+
+#[test]
+fn ech_grease_shape_rejects_bad_values() {
+    let mut ssl = new_ssl();
+    assert!(ssl.set_ech_grease_aeads(&[0x0004]).is_err());
+    assert!(ssl.set_ech_grease_aeads(&[]).is_ok());
+    assert!(ssl.set_ech_grease_payload_len(15).is_err());
+    assert!(ssl.set_ech_grease_payload_len(0).is_ok());
+}

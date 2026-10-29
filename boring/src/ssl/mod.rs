@@ -3289,6 +3289,35 @@ impl SslRef {
         unsafe { ffi::SSL_set_client_hello_padding(self.as_ptr(), enabled as _) }
     }
 
+    /// Sets the HPKE AEAD IDs GREASE ECH extensions may claim; each ClientHello
+    /// uses one of them, picked at random. Supported IDs are `0x0001`
+    /// (AES-128-GCM), `0x0002` (AES-256-GCM) and `0x0003` (ChaCha20-Poly1305). An
+    /// empty slice restores the default (picked by AES hardware support).
+    ///
+    /// Requires the `client-hello-extensions` feature.
+    #[cfg(feature = "client-hello-extensions")]
+    #[corresponds(SSL_set_ech_grease_aeads)]
+    pub fn set_ech_grease_aeads(&mut self, aead_ids: &[u16]) -> Result<(), ErrorStack> {
+        unsafe {
+            cvt(ffi::SSL_set_ech_grease_aeads(
+                self.as_ptr(),
+                aead_ids.as_ptr(),
+                aead_ids.len(),
+            ))
+        }
+    }
+
+    /// Sends GREASE ECH extensions with a payload of exactly `len` bytes
+    /// (ciphertext including the AEAD tag); `0` restores the default random
+    /// length.
+    ///
+    /// Requires the `client-hello-extensions` feature.
+    #[cfg(feature = "client-hello-extensions")]
+    #[corresponds(SSL_set_ech_grease_payload_len)]
+    pub fn set_ech_grease_payload_len(&mut self, len: usize) -> Result<(), ErrorStack> {
+        unsafe { cvt(ffi::SSL_set_ech_grease_payload_len(self.as_ptr(), len)) }
+    }
+
     /// Like [`SslContextBuilder::set_alpn_protos`].
     ///
     /// [`SslContextBuilder::set_alpn_protos`]: struct.SslContextBuilder.html#method.set_alpn_protos
