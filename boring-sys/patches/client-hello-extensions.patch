@@ -1,0 +1,489 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: blogerandrey-ux <blogerandrey-ux@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 20:04:17 +0600
+Subject: [PATCH] Add ClientHello controls for reproducing other TLS stacks
+
+This patch adds four client-only knobs, all off by default:
+
+1. SSL_set_extension_order: send ClientHello extensions in an explicit
+   order of codepoints. Unlisted extensions follow in the default order;
+   GREASE, padding and pre_shared_key keep their positions. Takes
+   precedence over SSL_set_permute_extensions.
+
+2. SSL_set_record_size_limit: offer record_size_limit (RFC 8449). A limit
+   returned by the server caps the plaintext of records we send.
+
+3. SSL_set_delegated_credential_sigalgs: offer delegated_credential
+   (RFC 9345) with the given signature algorithms. Signalling only; a
+   delegated credential in the server's Certificate fails the handshake.
+
+4. SSL_set_client_hello_padding: the RFC 7685 padding rule of earlier
+   BoringSSL versions (ClientHellos of 256..511 bytes padded to 512), as
+   still sent by Android's Conscrypt.
+
+Together these let a BoringSSL client reproduce the ClientHello of NSS
+(Firefox) and of older BoringSSL builds byte for byte.
+---
+ include/openssl/prefix_symbols.h |   8 ++
+ include/openssl/ssl.h            |  47 ++++++
+ include/openssl/tls1.h           |   3 +
+ ssl/extensions.cc                | 240 ++++++++++++++++++++++++++++++-
+ ssl/internal.h                   |  16 +++
+ 5 files changed, 311 insertions(+), 3 deletions(-)
+
+diff --git a/include/openssl/prefix_symbols.h b/include/openssl/prefix_symbols.h
+index e41c0eb..6f1ec08 100644
+--- a/include/openssl/prefix_symbols.h
++++ b/include/openssl/prefix_symbols.h
+@@ -2385,12 +2385,15 @@
+ #pragma redefine_extname SSL_set_chain_and_key BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_chain_and_key)
+ #pragma redefine_extname SSL_set_cipher_list BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_cipher_list)
+ #pragma redefine_extname SSL_set_client_CA_list BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_client_CA_list)
++#pragma redefine_extname SSL_set_client_hello_padding BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_client_hello_padding)
+ #pragma redefine_extname SSL_set_compliance_policy BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_compliance_policy)
+ #pragma redefine_extname SSL_set_connect_state BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_connect_state)
+ #pragma redefine_extname SSL_set_custom_verify BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_custom_verify)
++#pragma redefine_extname SSL_set_delegated_credential_sigalgs BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_delegated_credential_sigalgs)
+ #pragma redefine_extname SSL_set_early_data_enabled BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_early_data_enabled)
+ #pragma redefine_extname SSL_set_enable_ech_grease BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_enable_ech_grease)
+ #pragma redefine_extname SSL_set_ex_data BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_ex_data)
++#pragma redefine_extname SSL_set_extension_order BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_extension_order)
+ #pragma redefine_extname SSL_set_fd BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_fd)
+ #pragma redefine_extname SSL_set_handshake_hints BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_handshake_hints)
+ #pragma redefine_extname SSL_set_hostflags BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_hostflags)
+@@ -2417,6 +2420,7 @@
+ #pragma redefine_extname SSL_set_quic_use_legacy_codepoint BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_quic_use_legacy_codepoint)
+ #pragma redefine_extname SSL_set_quiet_shutdown BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_quiet_shutdown)
+ #pragma redefine_extname SSL_set_read_ahead BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_read_ahead)
++#pragma redefine_extname SSL_set_record_size_limit BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_record_size_limit)
+ #pragma redefine_extname SSL_set_reject_unusable_ech_config BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_reject_unusable_ech_config)
+ #pragma redefine_extname SSL_set_renegotiate_mode BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_renegotiate_mode)
+ #pragma redefine_extname SSL_set_resumption_across_names_enabled BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_resumption_across_names_enabled)
+@@ -5539,12 +5543,15 @@
+ #define SSL_set_chain_and_key BORINGSSL_ADD_PREFIX(SSL_set_chain_and_key)
+ #define SSL_set_cipher_list BORINGSSL_ADD_PREFIX(SSL_set_cipher_list)
+ #define SSL_set_client_CA_list BORINGSSL_ADD_PREFIX(SSL_set_client_CA_list)
++#define SSL_set_client_hello_padding BORINGSSL_ADD_PREFIX(SSL_set_client_hello_padding)
+ #define SSL_set_compliance_policy BORINGSSL_ADD_PREFIX(SSL_set_compliance_policy)
+ #define SSL_set_connect_state BORINGSSL_ADD_PREFIX(SSL_set_connect_state)
+ #define SSL_set_custom_verify BORINGSSL_ADD_PREFIX(SSL_set_custom_verify)
++#define SSL_set_delegated_credential_sigalgs BORINGSSL_ADD_PREFIX(SSL_set_delegated_credential_sigalgs)
+ #define SSL_set_early_data_enabled BORINGSSL_ADD_PREFIX(SSL_set_early_data_enabled)
+ #define SSL_set_enable_ech_grease BORINGSSL_ADD_PREFIX(SSL_set_enable_ech_grease)
+ #define SSL_set_ex_data BORINGSSL_ADD_PREFIX(SSL_set_ex_data)
++#define SSL_set_extension_order BORINGSSL_ADD_PREFIX(SSL_set_extension_order)
+ #define SSL_set_fd BORINGSSL_ADD_PREFIX(SSL_set_fd)
+ #define SSL_set_handshake_hints BORINGSSL_ADD_PREFIX(SSL_set_handshake_hints)
+ #define SSL_set_hostflags BORINGSSL_ADD_PREFIX(SSL_set_hostflags)
+@@ -5571,6 +5578,7 @@
+ #define SSL_set_quic_use_legacy_codepoint BORINGSSL_ADD_PREFIX(SSL_set_quic_use_legacy_codepoint)
+ #define SSL_set_quiet_shutdown BORINGSSL_ADD_PREFIX(SSL_set_quiet_shutdown)
+ #define SSL_set_read_ahead BORINGSSL_ADD_PREFIX(SSL_set_read_ahead)
++#define SSL_set_record_size_limit BORINGSSL_ADD_PREFIX(SSL_set_record_size_limit)
+ #define SSL_set_reject_unusable_ech_config BORINGSSL_ADD_PREFIX(SSL_set_reject_unusable_ech_config)
+ #define SSL_set_renegotiate_mode BORINGSSL_ADD_PREFIX(SSL_set_renegotiate_mode)
+ #define SSL_set_resumption_across_names_enabled BORINGSSL_ADD_PREFIX(SSL_set_resumption_across_names_enabled)
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index a13db14..a89b6f3 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -5685,6 +5685,53 @@ OPENSSL_EXPORT void SSL_CTX_set_permute_extensions(SSL_CTX *ctx, int enabled);
+ // permute extensions. For now, this is only implemented for the ClientHello.
+ OPENSSL_EXPORT void SSL_set_permute_extensions(SSL *ssl, int enabled);
+ 
++// SSL_set_extension_order configures `ssl`, a client, to send ClientHello
++// extensions in the order of `ext_types`, a list of `num_ext_types` extension
++// codepoints. Listed extensions that are not sent on a connection are skipped.
++// Extensions that are sent but not listed follow the listed ones, in the
++// default order. GREASE extensions (see `SSL_CTX_set_grease_enabled`) stay
++// first and last, and padding and pre_shared_key are still added at the end.
++//
++// Every codepoint must be an extension this library can send, and none may
++// repeat. An empty list restores the default order. When set, the order takes
++// precedence over `SSL_set_permute_extensions`. It returns one on success and
++// zero on error.
++//
++// This is intended for clients that must reproduce the ClientHello of another
++// TLS implementation.
++OPENSSL_EXPORT int SSL_set_extension_order(SSL *ssl, const uint16_t *ext_types,
++                                           size_t num_ext_types);
++
++// SSL_set_record_size_limit configures `ssl`, a client, to offer the
++// record_size_limit extension (RFC 8449) with value `limit`, which must be
++// between 64 and 16385, inclusive. Zero disables the extension, which is the
++// default. It returns one on success and zero on error.
++//
++// If the server sends the extension back, records sent on `ssl` carry at most
++// the server's limit of plaintext (minus one in TLS 1.3, for the content
++// type). Records received from the server are not checked against `limit`.
++OPENSSL_EXPORT int SSL_set_record_size_limit(SSL *ssl, uint16_t limit);
++
++// SSL_set_delegated_credential_sigalgs configures `ssl`, a client, to offer the
++// delegated_credential extension (RFC 9345) in TLS 1.3 with the signature
++// algorithms `sigalgs`. An empty list disables the extension, which is the
++// default. It returns one on success and zero on error.
++//
++// This only signals support. Client-side verification of delegated credentials
++// is not implemented: if the server sends one in its Certificate message, the
++// handshake fails with a decode_error alert.
++OPENSSL_EXPORT int SSL_set_delegated_credential_sigalgs(SSL *ssl,
++                                                        const uint16_t *sigalgs,
++                                                        size_t num_sigalgs);
++
++// SSL_set_client_hello_padding configures whether `ssl`, a client, pads its
++// ClientHello with the padding extension (RFC 7685) the way earlier versions
++// of this library did: a ClientHello message of more than 255 and less than
++// 512 bytes is padded to 512 bytes. This reproduces the ClientHello of TLS
++// stacks built on those versions, such as Android's Conscrypt. It is disabled
++// by default.
++OPENSSL_EXPORT void SSL_set_client_hello_padding(SSL *ssl, int enabled);
++
+ // SSL_max_seal_overhead returns the maximum overhead, in bytes, of sealing a
+ // record with `ssl`.
+ OPENSSL_EXPORT size_t SSL_max_seal_overhead(const SSL *ssl);
+diff --git a/include/openssl/tls1.h b/include/openssl/tls1.h
+index f4b3484..f17d5f3 100644
+--- a/include/openssl/tls1.h
++++ b/include/openssl/tls1.h
+@@ -71,6 +71,9 @@ extern "C" {
+ // ExtensionType value from RFC 7685
+ #define TLSEXT_TYPE_padding 21
+ 
++// ExtensionType value from RFC 8449
++#define TLSEXT_TYPE_record_size_limit 28
++
+ // ExtensionType value from RFC 7627
+ #define TLSEXT_TYPE_extended_master_secret 23
+ 
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index 2677314..1871b2d 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -1992,6 +1992,30 @@ static bool should_offer_psk(const SSL_HANDSHAKE *hs,
+ // This function differs from other `CBB` functions because it needs to
+ // accommodate PSK binders. It must write the PSK extension, flush the `CBB` to
+ // write out a length prefix, and then finally sample the whole ClientHello.
++// ext_pre_shared_key_clienthello_length returns the encoded length of the
++// pre_shared_key extension `ext_pre_shared_key_add_clienthello` would write.
++static size_t ext_pre_shared_key_clienthello_length(
++    const SSL_HANDSHAKE *hs, ssl_client_hello_type_t type) {
++  if (!should_offer_psk(hs, type)) {
++    return 0;
++  }
++  // type, length, identities length, binders length.
++  size_t len = 2 + 2 + 2 + 2;
++  for (const auto &psk : hs->pre_shared_keys) {
++    size_t identity_len;
++    if (const auto *imported = std::get_if<SSLImportedPSK>(&psk);
++        imported != nullptr) {
++      identity_len = imported->imported_identity.size();
++    } else {
++      identity_len = std::get<UniquePtr<SSLSession>>(psk)->ticket.size();
++    }
++    // identity, obfuscated_ticket_age, binder.
++    len += 2 + identity_len + 4;
++    len += 1 + EVP_MD_size(ssl_pre_shared_key_hash(psk));
++  }
++  return len;
++}
++
+ static bool ext_pre_shared_key_add_clienthello(const SSL_HANDSHAKE *hs,
+                                                CBB *out_client_hello,
+                                                CBB *out_extensions,
+@@ -3295,7 +3319,23 @@ static bool ext_quic_transport_params_add_serverhello_legacy(SSL_HANDSHAKE *hs,
+ static bool ext_delegated_credential_add_clienthello(
+     const SSL_HANDSHAKE *hs, CBB *out, CBB *out_compressible,
+     ssl_client_hello_type_t type) {
+-  return true;
++  if (hs->config->delegated_credential_sigalgs.empty() ||
++      hs->max_version < TLS1_3_VERSION) {
++    return true;
++  }
++
++  CBB contents, sigalgs;
++  if (!CBB_add_u16(out_compressible, TLSEXT_TYPE_delegated_credential) ||
++      !CBB_add_u16_length_prefixed(out_compressible, &contents) ||
++      !CBB_add_u16_length_prefixed(&contents, &sigalgs)) {
++    return false;
++  }
++  for (uint16_t sigalg : hs->config->delegated_credential_sigalgs) {
++    if (!CBB_add_u16(&sigalgs, sigalg)) {
++      return false;
++    }
++  }
++  return CBB_flush(out_compressible);
+ }
+ 
+ static bool ext_delegated_credential_parse_clienthello(SSL_HANDSHAKE *hs,
+@@ -4094,6 +4134,55 @@ static bool ext_server_cert_type_add_serverhello(SSL_HANDSHAKE *hs, CBB *out) {
+   return true;
+ }
+ 
++// Record size limit.
++//
++// https://www.rfc-editor.org/rfc/rfc8449.html
++
++static bool ext_record_size_limit_add_clienthello(
++    const SSL_HANDSHAKE *hs, CBB *out, CBB *out_compressible,
++    ssl_client_hello_type_t type) {
++  if (hs->config->record_size_limit == 0) {
++    return true;
++  }
++
++  CBB contents;
++  if (!CBB_add_u16(out_compressible, TLSEXT_TYPE_record_size_limit) ||
++      !CBB_add_u16_length_prefixed(out_compressible, &contents) ||
++      !CBB_add_u16(&contents, hs->config->record_size_limit)) {
++    return false;
++  }
++  return CBB_flush(out_compressible);
++}
++
++static bool ext_record_size_limit_parse_serverhello(SSL_HANDSHAKE *hs,
++                                                    uint8_t *out_alert,
++                                                    CBS *contents) {
++  if (contents == nullptr) {
++    return true;
++  }
++
++  uint16_t limit;
++  if (!CBS_get_u16(contents, &limit) || CBS_len(contents) != 0) {
++    return false;
++  }
++  if (limit < 64) {
++    OPENSSL_PUT_ERROR(SSL, SSL_R_BAD_LENGTH);
++    *out_alert = SSL_AD_ILLEGAL_PARAMETER;
++    return false;
++  }
++
++  // In TLS 1.3 the limit includes the inner content type byte.
++  SSLImpl *const ssl = hs->ssl;
++  size_t max_plaintext = limit;
++  if (ssl_protocol_version(ssl) >= TLS1_3_VERSION) {
++    max_plaintext--;
++  }
++  if (max_plaintext < ssl->max_send_fragment) {
++    ssl->max_send_fragment = static_cast<uint16_t>(max_plaintext);
++  }
++  return true;
++}
++
+ // kExtensions contains all the supported extensions.
+ static const struct tls_extension kExtensions[] = {
+     {
+@@ -4323,6 +4412,14 @@ static const struct tls_extension kExtensions[] = {
+         ext_server_padding_parse_clienthello,
+         ext_server_padding_add_serverhello,
+     },
++    {
++        TLSEXT_TYPE_record_size_limit,
++        ext_record_size_limit_add_clienthello,
++        ext_record_size_limit_parse_serverhello,
++        // Servers do not negotiate record_size_limit.
++        ignore_parse_clienthello,
++        dont_add_serverhello,
++    },
+ };
+ 
+ #define kNumExtensions (sizeof(kExtensions) / sizeof(struct tls_extension))
+@@ -4334,7 +4431,39 @@ static_assert(kNumExtensions <=
+                   sizeof(((SSL_HANDSHAKE *)nullptr)->extensions.received) * 8,
+               "too many extensions for received bitset");
+ 
++static bool ssl_setup_extension_order(SSL_HANDSHAKE *hs) {
++  static_assert(kNumExtensions <= UINT8_MAX,
++                "extensions_permutation type is too small");
++  Array<uint8_t> permutation;
++  if (!permutation.InitForOverwrite(kNumExtensions)) {
++    return false;
++  }
++  bool placed[kNumExtensions] = {};
++  size_t n = 0;
++  for (uint16_t type : hs->config->extension_order) {
++    // `SSL_set_extension_order` only accepts known, distinct codepoints.
++    for (size_t i = 0; i < kNumExtensions; i++) {
++      if (kExtensions[i].value == type && !placed[i]) {
++        placed[i] = true;
++        permutation[n++] = static_cast<uint8_t>(i);
++        break;
++      }
++    }
++  }
++  for (size_t i = 0; i < kNumExtensions; i++) {
++    if (!placed[i]) {
++      permutation[n++] = static_cast<uint8_t>(i);
++    }
++  }
++  assert(n == kNumExtensions);
++  hs->extension_permutation = std::move(permutation);
++  return true;
++}
++
+ bool ssl_setup_extension_permutation(SSL_HANDSHAKE *hs) {
++  if (!hs->config->extension_order.empty()) {
++    return ssl_setup_extension_order(hs);
++  }
+   if (!hs->config->permute_extensions) {
+     return true;
+   }
+@@ -4382,6 +4511,50 @@ static bool add_padding_extension(CBB *cbb, uint16_t ext, size_t len) {
+   return CBB_flush(cbb);
+ }
+ 
++// add_client_hello_padding implements `SSL_set_client_hello_padding`. It is
++// called after all other extensions except pre_shared_key are written to
++// `extensions`, and `header_len` is the length of the ClientHello body before
++// the extensions block.
++static bool add_client_hello_padding(const SSL_HANDSHAKE *hs, CBB *extensions,
++                                     size_t header_len, bool last_was_empty,
++                                     ssl_client_hello_type_t type) {
++  const SSLImpl *const ssl = hs->ssl;
++  if (SSL_is_dtls(ssl) || SSL_is_quic(ssl) ||
++      ssl->s3->used_hello_retry_request) {
++    return true;
++  }
++
++  const size_t psk_len = ext_pre_shared_key_clienthello_length(hs, type);
++  size_t msg_len =
++      SSL3_HM_HEADER_LENGTH + header_len + 2 + CBB_len(extensions) + psk_len;
++  size_t padding_len = 0;
++  // The final extension must be non-empty. WebSphere Application Server 7.0 is
++  // intolerant to the last extension being zero-length. See
++  // https://crbug.com/363583.
++  if (last_was_empty && psk_len == 0) {
++    padding_len = 1;
++    msg_len += 4 + padding_len;
++  }
++  // Pad ClientHellos of 256 to 511 bytes to 512 bytes to work around a bug in
++  // F5 terminators. See RFC 7685.
++  if (msg_len > 0xff && msg_len < 0x200) {
++    if (padding_len != 0) {
++      msg_len -= 4 + padding_len;
++    }
++    padding_len = 0x200 - msg_len;
++    // The extension header takes four bytes, and the body must not be empty.
++    if (padding_len >= 4 + 1) {
++      padding_len -= 4;
++    } else {
++      padding_len = 1;
++    }
++  }
++  if (padding_len == 0) {
++    return true;
++  }
++  return add_padding_extension(extensions, TLSEXT_TYPE_padding, padding_len);
++}
++
+ static bool ssl_add_clienthello_tlsext_inner(SSL_HANDSHAKE *hs, CBB *out,
+                                              CBB *out_encoded) {
+   // When writing ClientHelloInner, we construct the real and encoded
+@@ -4503,6 +4676,7 @@ bool ssl_add_clienthello_tlsext(SSL_HANDSHAKE *hs, CBB *out, CBB *out_encoded,
+ 
+   assert(out_encoded == nullptr);  // Only ClientHelloInner needs two outputs.
+   SSLImpl *const ssl = hs->ssl;
++  const size_t header_len = CBB_len(out);
+   CBB extensions;
+   if (!CBB_add_u16_length_prefixed(out, &extensions)) {
+     OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
+@@ -4555,8 +4729,13 @@ bool ssl_add_clienthello_tlsext(SSL_HANDSHAKE *hs, CBB *out, CBB *out_encoded,
+   // intolerant to the last extension being zero-length. See
+   // https://crbug.com/363583.
+   bool offering_psk = should_offer_psk(hs, type);
+-  if (!offering_psk && last_was_empty && !SSL_is_dtls(ssl) &&
+-      !SSL_is_quic(ssl) && !ssl->s3->used_hello_retry_request) {
++  if (hs->config->client_hello_padding) {
++    if (!add_client_hello_padding(hs, &extensions, header_len, last_was_empty,
++                                  type)) {
++      return false;
++    }
++  } else if (!offering_psk && last_was_empty && !SSL_is_dtls(ssl) &&
++             !SSL_is_quic(ssl) && !ssl->s3->used_hello_retry_request) {
+     if (!add_padding_extension(&extensions, TLSEXT_TYPE_padding, 1)) {
+       return false;
+     }
+@@ -5372,3 +5551,58 @@ int SSL_early_callback_ctx_extension_get(const SSL_CLIENT_HELLO *client_hello,
+   *out_len = CBS_len(&cbs);
+   return 1;
+ }
++
++int SSL_set_extension_order(SSL *ssl, const uint16_t *ext_types,
++                            size_t num_ext_types) {
++  auto *ssl_impl = FromOpaque(ssl);
++  if (!ssl_impl->config) {
++    return 0;
++  }
++  auto types = Span(ext_types, num_ext_types);
++  for (size_t i = 0; i < types.size(); i++) {
++    uint32_t unused;
++    if (tls_extension_find(&unused, types[i]) == nullptr) {
++      OPENSSL_PUT_ERROR(SSL, SSL_R_UNEXPECTED_EXTENSION);
++      ERR_add_error_dataf("extension %u", unsigned{types[i]});
++      return 0;
++    }
++    if (std::find(types.begin(), types.begin() + i, types[i]) !=
++        types.begin() + i) {
++      OPENSSL_PUT_ERROR(SSL, SSL_R_DUPLICATE_EXTENSION);
++      ERR_add_error_dataf("extension %u", unsigned{types[i]});
++      return 0;
++    }
++  }
++  return ssl_impl->config->extension_order.CopyFrom(types);
++}
++
++int SSL_set_record_size_limit(SSL *ssl, uint16_t limit) {
++  auto *ssl_impl = FromOpaque(ssl);
++  if (!ssl_impl->config) {
++    return 0;
++  }
++  if (limit != 0 && (limit < 64 || limit > SSL3_RT_MAX_PLAIN_LENGTH + 1)) {
++    OPENSSL_PUT_ERROR(SSL, SSL_R_BAD_LENGTH);
++    return 0;
++  }
++  ssl_impl->config->record_size_limit = limit;
++  return 1;
++}
++
++int SSL_set_delegated_credential_sigalgs(SSL *ssl, const uint16_t *sigalgs,
++                                         size_t num_sigalgs) {
++  auto *ssl_impl = FromOpaque(ssl);
++  if (!ssl_impl->config) {
++    return 0;
++  }
++  return ssl_impl->config->delegated_credential_sigalgs.CopyFrom(
++      Span(sigalgs, num_sigalgs));
++}
++
++void SSL_set_client_hello_padding(SSL *ssl, int enabled) {
++  auto *ssl_impl = FromOpaque(ssl);
++  if (!ssl_impl->config) {
++    return;
++  }
++  ssl_impl->config->client_hello_padding = !!enabled;
++}
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 57fffad..875be86 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -3572,6 +3572,22 @@ struct SSL_CONFIG {
+   // structure for the client to use when negotiating ECH.
+   Array<uint8_t> client_ech_config_list;
+ 
++  // extension_order, if not empty, is the order in which a client sends
++  // ClientHello extensions. See `SSL_set_extension_order`.
++  Array<uint16_t> extension_order;
++
++  // delegated_credential_sigalgs, if not empty, is the list of signature
++  // algorithms a client offers in the delegated_credential extension.
++  Array<uint16_t> delegated_credential_sigalgs;
++
++  // record_size_limit, if non-zero, is the record_size_limit extension value a
++  // client offers.
++  uint16_t record_size_limit = 0;
++
++  // client_hello_padding is whether a client pads its ClientHello. See
++  // `SSL_set_client_hello_padding`.
++  bool client_hello_padding = false;
++
+   // compliance_policy limits the set of ciphers that can be selected when
+   // negotiating a TLS 1.3 connection.
+   enum ssl_compliance_policy_t compliance_policy = ssl_compliance_policy_none;

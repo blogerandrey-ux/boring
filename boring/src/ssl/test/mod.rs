@@ -27,6 +27,8 @@ use super::CompliancePolicy;
 
 mod cert_compressor;
 mod cert_verify;
+#[cfg(feature = "client-hello-extensions")]
+mod client_hello_extensions;
 mod custom_verify;
 mod ech;
 mod private_key_method;

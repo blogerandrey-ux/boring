@@ -3218,6 +3218,77 @@ impl SslRef {
         unsafe { ffi::SSL_set_permute_extensions(self.as_ptr(), enabled as _) }
     }
 
+    /// Sends ClientHello extensions in the order of `ext_types` (extension
+    /// codepoints).
+    ///
+    /// Listed extensions that are not sent are skipped; sent extensions that are
+    /// not listed follow in the default order. GREASE, padding and
+    /// pre_shared_key keep their positions. Every codepoint must be one BoringSSL
+    /// can send, without repeats. An empty slice restores the default order. Takes
+    /// precedence over [`SslRef::set_permute_extensions`].
+    ///
+    /// Requires the `client-hello-extensions` feature.
+    #[cfg(feature = "client-hello-extensions")]
+    #[corresponds(SSL_set_extension_order)]
+    pub fn set_extension_order(&mut self, ext_types: &[u16]) -> Result<(), ErrorStack> {
+        unsafe {
+            cvt(ffi::SSL_set_extension_order(
+                self.as_ptr(),
+                ext_types.as_ptr(),
+                ext_types.len(),
+            ))
+        }
+    }
+
+    /// Offers the record_size_limit extension (RFC 8449) with `limit`, which must
+    /// be in `64..=16385`; `0` disables it (the default).
+    ///
+    /// A limit sent back by the server caps the plaintext of records sent on this
+    /// connection. Records received from the server are not checked against
+    /// `limit`.
+    ///
+    /// Requires the `client-hello-extensions` feature.
+    #[cfg(feature = "client-hello-extensions")]
+    #[corresponds(SSL_set_record_size_limit)]
+    pub fn set_record_size_limit(&mut self, limit: u16) -> Result<(), ErrorStack> {
+        unsafe { cvt(ffi::SSL_set_record_size_limit(self.as_ptr(), limit)) }
+    }
+
+    /// Offers the delegated_credential extension (RFC 9345) in TLS 1.3 with the
+    /// given signature algorithms; an empty slice disables it (the default).
+    ///
+    /// This only signals support: client-side verification of delegated
+    /// credentials is not implemented, so a server that sends one fails the
+    /// handshake.
+    ///
+    /// Requires the `client-hello-extensions` feature.
+    #[cfg(feature = "client-hello-extensions")]
+    #[corresponds(SSL_set_delegated_credential_sigalgs)]
+    pub fn set_delegated_credential_sigalgs(
+        &mut self,
+        sigalgs: &[SslSignatureAlgorithm],
+    ) -> Result<(), ErrorStack> {
+        unsafe {
+            cvt(ffi::SSL_set_delegated_credential_sigalgs(
+                self.as_ptr(),
+                sigalgs.as_ptr().cast(),
+                sigalgs.len(),
+            ))
+        }
+    }
+
+    /// Pads the ClientHello with the padding extension (RFC 7685) the way earlier
+    /// BoringSSL versions did: a ClientHello of 256 to 511 bytes is padded to 512
+    /// bytes. Matches TLS stacks built on those versions, such as Android's
+    /// Conscrypt. Disabled by default.
+    ///
+    /// Requires the `client-hello-extensions` feature.
+    #[cfg(feature = "client-hello-extensions")]
+    #[corresponds(SSL_set_client_hello_padding)]
+    pub fn set_client_hello_padding(&mut self, enabled: bool) {
+        unsafe { ffi::SSL_set_client_hello_padding(self.as_ptr(), enabled as _) }
+    }
+
     /// Like [`SslContextBuilder::set_alpn_protos`].
     ///
     /// [`SslContextBuilder::set_alpn_protos`]: struct.SslContextBuilder.html#method.set_alpn_protos

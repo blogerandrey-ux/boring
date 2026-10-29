@@ -480,12 +480,14 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
     } else if config.env.source_path.is_some()
         && (config.features.rpk
             || config.features.underscore_wildcards
-            || config.features.relax_cert_validation)
+            || config.features.relax_cert_validation
+            || config.features.client_hello_extensions)
     {
         panic!(
             "BORING_BSSL_ASSUME_PATCHED must be set when setting
                BORING_BSSL_SOURCE_PATH and using any of the following
-               features: rpk, underscore-wildcards, relax-cert-validation"
+               features: rpk, underscore-wildcards, relax-cert-validation,
+               client-hello-extensions"
         );
     }
 
@@ -524,6 +526,11 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
     if config.features.relax_cert_validation {
         println!("cargo:warning=applying RSA key-usage enforcement relaxation patch");
         apply_patch(config, "relax-cert-validation.patch")?;
+    }
+
+    if config.features.client_hello_extensions {
+        println!("cargo:warning=applying ClientHello extensions patch to boringssl");
+        apply_patch(config, "client-hello-extensions.patch")?;
     }
 
     Ok(())

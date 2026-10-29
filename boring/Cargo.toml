@@ -58,6 +58,16 @@ underscore-wildcards = ["boring-sys/underscore-wildcards"]
 # during TLS handshakes.
 relax-cert-validation = ["boring-sys/relax-cert-validation"]
 
+# Applies a patch (`patches/client-hello-extensions.patch`) adding client-side
+# ClientHello controls: an explicit extension order, record_size_limit
+# (RFC 8449), delegated_credential signalling (RFC 9345) and the legacy RFC 7685
+# padding rule. These let a client reproduce the ClientHello of other TLS
+# stacks (NSS, older BoringSSL builds such as Android's Conscrypt). All are off
+# unless configured. Alternatively, a version of boringSSL that implements the
+# same feature set can be provided by setting `BORING_BSSL{,_FIPS}_SOURCE_PATH`
+# and `BORING_BSSL{,_FIPS}_ASSUME_PATCHED`.
+client-hello-extensions = ["boring-sys/client-hello-extensions"]
+
 # **DO NOT USE** This will be removed without warning in future releases.
 # Alias for 'fips', only for backwards compatibility.
 fips-precompiled = ["fips"]
