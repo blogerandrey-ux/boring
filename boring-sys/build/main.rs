@@ -531,6 +531,7 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
     if config.features.client_hello_extensions {
         println!("cargo:warning=applying ClientHello extensions patch to boringssl");
         apply_patch(config, "client-hello-extensions.patch")?;
+        apply_patch(config, "client-hello-session-id.patch")?;
     }
 
     Ok(())

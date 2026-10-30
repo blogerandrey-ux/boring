@@ -3321,6 +3321,50 @@ impl SslRef {
         unsafe { cvt(ffi::SSL_set_ech_grease_payload_len(self.as_ptr(), len)) }
     }
 
+    /// Calls `callback` for every ClientHello this client sends that carries a
+    /// session ID, after the rest of the message is serialized and before it
+    /// enters the handshake transcript.
+    ///
+    /// `callback` gets the session ID to fill in and the whole handshake message
+    /// (header included) with the session ID bytes zeroed. What it writes is
+    /// sent and becomes the value the server must echo. Returning `false` fails
+    /// the handshake.
+    ///
+    /// Requires the `client-hello-extensions` feature.
+    #[cfg(feature = "client-hello-extensions")]
+    #[corresponds(SSL_set_client_hello_session_id_cb)]
+    pub fn set_client_hello_session_id_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(&mut SslRef, &mut [u8], &[u8]) -> bool + 'static + Sync + Send,
+    {
+        unsafe {
+            self.replace_ex_data(Ssl::cached_ex_index(), Arc::new(callback));
+            ffi::SSL_set_client_hello_session_id_cb(
+                self.as_ptr(),
+                Some(callbacks::raw_client_hello_session_id::<F>),
+                ptr::null_mut(),
+            );
+        }
+    }
+
+    /// The X25519 private key of this client's key share in group `group_id`:
+    /// the key itself for X25519 (`0x001d`), the X25519 half for
+    /// X25519MLKEM768 (`0x11ec`). Available from the
+    /// [session ID callback](Self::set_client_hello_session_id_callback) until
+    /// the ServerHello is processed; `None` otherwise or without such a share.
+    ///
+    /// Requires the `client-hello-extensions` feature.
+    #[cfg(feature = "client-hello-extensions")]
+    #[corresponds(SSL_get_client_key_share_x25519)]
+    #[must_use]
+    pub fn client_key_share_x25519(&self, group_id: u16) -> Option<[u8; 32]> {
+        let mut out = [0u8; 32];
+        let ok = unsafe {
+            ffi::SSL_get_client_key_share_x25519(self.as_ptr(), group_id, out.as_mut_ptr())
+        };
+        (ok == 1).then_some(out)
+    }
+
     /// Like [`SslContextBuilder::set_alpn_protos`].
     ///
     /// [`SslContextBuilder::set_alpn_protos`]: struct.SslContextBuilder.html#method.set_alpn_protos

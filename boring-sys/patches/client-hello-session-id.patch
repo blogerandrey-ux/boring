@@ -1,0 +1,255 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: blogerandrey-ux <blogerandrey-ux@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 00:00:00 +0000
+Subject: [PATCH] Add a ClientHello session ID callback for clients
+
+SSL_set_client_hello_session_id_cb lets a client fill in the
+legacy_session_id of each ClientHello after the rest of the message is
+serialized and before it enters the transcript. The callback sees the
+whole message with the session ID zeroed, so the value can authenticate
+the ClientHello, as REALITY does (an AES-GCM-sealed token keyed by the
+X25519 secret with the server's static key, with the ClientHello as AAD).
+The new value is also what the client expects the ServerHello to echo.
+
+SSL_get_client_key_share_x25519 exposes the X25519 private key of a
+client key share (X25519, or the X25519 half of X25519MLKEM768) for that
+callback, until the ServerHello is processed.
+
+Both are client-only and do nothing unless set.
+---
+ include/openssl/prefix_symbols.h |  4 ++++
+ include/openssl/ssl.h            | 33 +++++++++++++++++++++++++++
+ ssl/handshake_client.cc          | 38 +++++++++++++++++++++++++++++++-
+ ssl/internal.h                   | 10 +++++++++
+ ssl/ssl_key_share.cc             | 10 +++++++++
+ ssl/ssl_lib.cc                   | 25 +++++++++++++++++++++
+ 6 files changed, 119 insertions(+), 1 deletion(-)
+
+diff --git a/include/openssl/prefix_symbols.h b/include/openssl/prefix_symbols.h
+index 495abdb..3929347 100644
+--- a/include/openssl/prefix_symbols.h
++++ b/include/openssl/prefix_symbols.h
+@@ -2226,6 +2226,7 @@
+ #pragma redefine_extname SSL_get_cipher_list BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_get_cipher_list)
+ #pragma redefine_extname SSL_get_ciphers BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_get_ciphers)
+ #pragma redefine_extname SSL_get_client_CA_list BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_get_client_CA_list)
++#pragma redefine_extname SSL_get_client_key_share_x25519 BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_get_client_key_share_x25519)
+ #pragma redefine_extname SSL_get_client_random BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_get_client_random)
+ #pragma redefine_extname SSL_get_compliance_policy BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_get_compliance_policy)
+ #pragma redefine_extname SSL_get_current_cipher BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_get_current_cipher)
+@@ -2386,6 +2387,7 @@
+ #pragma redefine_extname SSL_set_cipher_list BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_cipher_list)
+ #pragma redefine_extname SSL_set_client_CA_list BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_client_CA_list)
+ #pragma redefine_extname SSL_set_client_hello_padding BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_client_hello_padding)
++#pragma redefine_extname SSL_set_client_hello_session_id_cb BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_client_hello_session_id_cb)
+ #pragma redefine_extname SSL_set_compliance_policy BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_compliance_policy)
+ #pragma redefine_extname SSL_set_connect_state BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_connect_state)
+ #pragma redefine_extname SSL_set_custom_verify BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_custom_verify)
+@@ -5386,6 +5388,7 @@
+ #define SSL_get_cipher_list BORINGSSL_ADD_PREFIX(SSL_get_cipher_list)
+ #define SSL_get_ciphers BORINGSSL_ADD_PREFIX(SSL_get_ciphers)
+ #define SSL_get_client_CA_list BORINGSSL_ADD_PREFIX(SSL_get_client_CA_list)
++#define SSL_get_client_key_share_x25519 BORINGSSL_ADD_PREFIX(SSL_get_client_key_share_x25519)
+ #define SSL_get_client_random BORINGSSL_ADD_PREFIX(SSL_get_client_random)
+ #define SSL_get_compliance_policy BORINGSSL_ADD_PREFIX(SSL_get_compliance_policy)
+ #define SSL_get_current_cipher BORINGSSL_ADD_PREFIX(SSL_get_current_cipher)
+@@ -5546,6 +5549,7 @@
+ #define SSL_set_cipher_list BORINGSSL_ADD_PREFIX(SSL_set_cipher_list)
+ #define SSL_set_client_CA_list BORINGSSL_ADD_PREFIX(SSL_set_client_CA_list)
+ #define SSL_set_client_hello_padding BORINGSSL_ADD_PREFIX(SSL_set_client_hello_padding)
++#define SSL_set_client_hello_session_id_cb BORINGSSL_ADD_PREFIX(SSL_set_client_hello_session_id_cb)
+ #define SSL_set_compliance_policy BORINGSSL_ADD_PREFIX(SSL_set_compliance_policy)
+ #define SSL_set_connect_state BORINGSSL_ADD_PREFIX(SSL_set_connect_state)
+ #define SSL_set_custom_verify BORINGSSL_ADD_PREFIX(SSL_set_custom_verify)
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index d935031..7e726e0 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -5748,6 +5748,39 @@ OPENSSL_EXPORT int SSL_set_ech_grease_aeads(SSL *ssl, const uint16_t *aead_ids,
+ // returns one on success and zero on error.
+ OPENSSL_EXPORT int SSL_set_ech_grease_payload_len(SSL *ssl, size_t len);
+ 
++// SSL_client_hello_session_id_cb_func fills in the legacy_session_id of a
++// ClientHello. See `SSL_set_client_hello_session_id_cb`.
++typedef int (*SSL_client_hello_session_id_cb_func)(
++    SSL *ssl, uint8_t *session_id, size_t session_id_len,
++    const uint8_t *client_hello, size_t client_hello_len, void *arg);
++
++// SSL_set_client_hello_session_id_cb configures `ssl`, a client, to call `cb`
++// for every ClientHello it sends that carries a session ID (in TLS 1.3 the
++// random compatibility-mode one), including the second ClientHello after a
++// HelloRetryRequest. `cb` runs after the message is serialized and before it
++// enters the handshake transcript or is written.
++//
++// `client_hello` is the complete handshake message, header included, with the
++// session ID bytes set to zero. `cb` writes `session_id_len` bytes to
++// `session_id`; they replace the session ID in the message and become the
++// value the server must echo. This lets the session ID depend on the rest of
++// the ClientHello, as in protocols that hide an authenticator in it. `cb`
++// returns one on success and zero to fail the handshake. `arg` is passed
++// through. A NULL `cb` disables the callback.
++OPENSSL_EXPORT void SSL_set_client_hello_session_id_cb(
++    SSL *ssl, SSL_client_hello_session_id_cb_func cb, void *arg);
++
++// SSL_get_client_key_share_x25519 copies to `out` the X25519 private key that
++// `ssl`, a client, generated for its key share in group `group_id`: the key
++// itself for `SSL_GROUP_X25519`, the X25519 half for
++// `SSL_GROUP_X25519_MLKEM768`. It is meant for the callback of
++// `SSL_set_client_hello_session_id_cb`, and works until the client processes
++// the ServerHello. It returns one on success and zero if there is no such key
++// share.
++OPENSSL_EXPORT int SSL_get_client_key_share_x25519(const SSL *ssl,
++                                                   uint16_t group_id,
++                                                   uint8_t out[32]);
++
+ // SSL_max_seal_overhead returns the maximum overhead, in bytes, of sealing a
+ // record with `ssl`.
+ OPENSSL_EXPORT size_t SSL_max_seal_overhead(const SSL *ssl);
+diff --git a/ssl/handshake_client.cc b/ssl/handshake_client.cc
+index 3d57f34..383235f 100644
+--- a/ssl/handshake_client.cc
++++ b/ssl/handshake_client.cc
+@@ -181,6 +181,41 @@ bool ssl_write_client_hello_without_extensions(const SSL_HANDSHAKE *hs,
+   return true;
+ }
+ 
++// run_session_id_callback lets the callback configured with
++// `SSL_set_client_hello_session_id_cb` fill in the session ID of `msg`, a
++// serialized ClientHello, and records the new value in `hs->session_id`, the
++// value the ServerHello must echo.
++static bool run_session_id_callback(SSL_HANDSHAKE *hs, Span<uint8_t> msg) {
++  SSLImpl *const ssl = hs->ssl;
++  if (ssl->config->client_hello_session_id_cb == nullptr ||
++      hs->session_id.empty()) {
++    return true;
++  }
++  // The session ID follows the message header, client_version and random.
++  const size_t header_len =
++      SSL_is_dtls(ssl) ? DTLS1_HM_HEADER_LENGTH : SSL3_HM_HEADER_LENGTH;
++  const size_t offset = header_len + 2 + SSL3_RANDOM_SIZE;
++  if (msg.size() <= offset || msg[offset] == 0) {
++    // No session ID on this ClientHello (renegotiation).
++    return true;
++  }
++  if (msg[offset] != hs->session_id.size() ||
++      msg.size() < offset + 1 + hs->session_id.size()) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++    return false;
++  }
++  Span<uint8_t> session_id = msg.subspan(offset + 1, hs->session_id.size());
++  OPENSSL_memset(session_id.data(), 0, session_id.size());
++  if (!ssl->config->client_hello_session_id_cb(
++          ssl, hs->session_id.data(), hs->session_id.size(), msg.data(),
++          msg.size(), ssl->config->client_hello_session_id_cb_arg)) {
++    OPENSSL_PUT_ERROR(SSL, SSL_R_HANDSHAKE_FAILURE_ON_CLIENT_HELLO);
++    return false;
++  }
++  OPENSSL_memcpy(session_id.data(), hs->session_id.data(), session_id.size());
++  return true;
++}
++
+ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
+   SSLImpl *const ssl = hs->ssl;
+   ScopedCBB cbb;
+@@ -193,7 +228,8 @@ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
+       !ssl_write_client_hello_without_extensions(hs, &body, type,
+                                                  /*empty_session_id=*/false) ||
+       !ssl_add_clienthello_tlsext(hs, &body, /*out_encoded=*/nullptr, type) ||
+-      !ssl->method->finish_message(ssl, cbb.get(), &msg)) {
++      !ssl->method->finish_message(ssl, cbb.get(), &msg) ||
++      !run_session_id_callback(hs, Span(msg))) {
+     return false;
+   }
+ 
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 3279d14..871c26d 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -940,6 +940,11 @@ class SSLKeyShare {
+   // DeserializePrivateKey initializes the state of the key exchange from `in`,
+   // returning true if successful and false otherwise.
+   virtual bool DeserializePrivateKey(CBS *in) { return false; }
++
++  // X25519PrivateKey copies the X25519 private key, or the X25519 half of a
++  // hybrid key, to `out` and returns true. Key shares without an X25519 part
++  // return false. It should be called after `Generate`.
++  virtual bool X25519PrivateKey(uint8_t out[32]) const { return false; }
+ };
+ 
+ struct NamedGroup {
+@@ -3595,6 +3600,11 @@ struct SSL_CONFIG {
+   // ech_grease_payload_len, if non-zero, is the GREASE ECH payload length.
+   size_t ech_grease_payload_len = 0;
+ 
++  // client_hello_session_id_cb, if set, fills in the session ID of each
++  // ClientHello. See `SSL_set_client_hello_session_id_cb`.
++  SSL_client_hello_session_id_cb_func client_hello_session_id_cb = nullptr;
++  void *client_hello_session_id_cb_arg = nullptr;
++
+   // compliance_policy limits the set of ciphers that can be selected when
+   // negotiating a TLS 1.3 connection.
+   enum ssl_compliance_policy_t compliance_policy = ssl_compliance_policy_none;
+diff --git a/ssl/ssl_key_share.cc b/ssl/ssl_key_share.cc
+index 2f006e9..09719bd 100644
+--- a/ssl/ssl_key_share.cc
++++ b/ssl/ssl_key_share.cc
+@@ -189,6 +189,11 @@ class X25519KeyShare : public SSLKeyShare {
+     return true;
+   }
+ 
++  bool X25519PrivateKey(uint8_t out[32]) const override {
++    OPENSSL_memcpy(out, private_key_, sizeof(private_key_));
++    return true;
++  }
++
+  private:
+   uint8_t private_key_[32];
+ };
+@@ -528,6 +533,11 @@ class X25519MLKEM768KeyShare : public SSLKeyShare {
+     return true;
+   }
+ 
++  bool X25519PrivateKey(uint8_t out[32]) const override {
++    OPENSSL_memcpy(out, x25519_private_key_, sizeof(x25519_private_key_));
++    return true;
++  }
++
+  private:
+   uint8_t x25519_private_key_[32];
+   MLKEM768_private_key mlkem_private_key_;
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index 33cc42d..c084c98 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -4165,3 +4165,28 @@ void SSL_set_server_padding_enabled(SSL *ssl, int enabled) {
+ int SSL_server_sent_requested_padding(const SSL *ssl) {
+   return FromOpaque(ssl)->s3->server_sent_requested_padding;
+ }
++
++void SSL_set_client_hello_session_id_cb(
++    SSL *ssl, SSL_client_hello_session_id_cb_func cb, void *arg) {
++  auto *ssl_impl = FromOpaque(ssl);
++  if (!ssl_impl->config) {
++    return;
++  }
++  ssl_impl->config->client_hello_session_id_cb = cb;
++  ssl_impl->config->client_hello_session_id_cb_arg = arg;
++}
++
++int SSL_get_client_key_share_x25519(const SSL *ssl, uint16_t group_id,
++                                    uint8_t out[32]) {
++  const auto *ssl_impl = FromOpaque(ssl);
++  const SSL_HANDSHAKE *hs = ssl_impl->s3->hs.get();
++  if (ssl_impl->server || hs == nullptr) {
++    return 0;
++  }
++  for (const auto &key_share : hs->key_shares) {
++    if (key_share->GroupID() == group_id) {
++      return key_share->X25519PrivateKey(out);
++    }
++  }
++  return 0;
++}
+-- 
+2.54.0.windows.1
+

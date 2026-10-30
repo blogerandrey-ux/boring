@@ -198,3 +198,98 @@ fn ech_grease_shape_rejects_bad_values() {
     assert!(ssl.set_ech_grease_payload_len(15).is_err());
     assert!(ssl.set_ech_grease_payload_len(0).is_ok());
 }
+
+/// The handshake message of a ClientHello body as the session ID callback sees
+/// it: header added, session ID zeroed.
+fn zeroed_message(body: &[u8]) -> Vec<u8> {
+    let len = body.len();
+    let mut msg = vec![1, (len >> 16) as u8, (len >> 8) as u8, len as u8];
+    msg.extend_from_slice(body);
+    let sid_len = usize::from(msg[38]);
+    msg[39..39 + sid_len].fill(0);
+    msg
+}
+
+#[test]
+fn session_id_callback_sets_the_echoed_session_id() {
+    let hello = client_hello_with(|ssl| {
+        ssl.set_client_hello_session_id_callback(|_, session_id, msg| {
+            assert_eq!(usize::from(msg[38]), session_id.len());
+            assert!(msg[39..39 + session_id.len()].iter().all(|&b| b == 0));
+            let digest = crate::sha::sha256(msg);
+            session_id.copy_from_slice(&digest[..session_id.len()]);
+            true
+        });
+    });
+    // The server got the derived session ID, and `connect` succeeded, so the
+    // client accepted the ServerHello echoing it.
+    let sid_len = usize::from(hello[34]);
+    assert_eq!(sid_len, 32);
+    let digest = crate::sha::sha256(&zeroed_message(&hello));
+    assert_eq!(&hello[35..35 + sid_len], &digest[..sid_len]);
+}
+
+#[test]
+fn session_id_callback_can_fail_the_handshake() {
+    let mut server = Server::builder();
+    server.should_error();
+    let server = server.build();
+    let client = server.client().build();
+    let mut builder = client.builder();
+    builder
+        .ssl()
+        .set_client_hello_session_id_callback(|_, _, _| false);
+    builder.connect_err();
+}
+
+#[test]
+fn client_key_share_x25519_matches_the_key_share() {
+    const X25519: u16 = 0x001d;
+    const X25519_MLKEM768: u16 = 0x11ec;
+    let keys = Arc::new(Mutex::new(Vec::new()));
+    let hello = client_hello_with({
+        let keys = keys.clone();
+        |ssl| {
+            ssl.set_curves_list("X25519MLKEM768:X25519").unwrap();
+            ssl.set_client_hello_session_id_callback(move |ssl, _, _| {
+                let mut keys = keys.lock().unwrap();
+                for group in [X25519_MLKEM768, X25519, 0x0017] {
+                    keys.push((group, ssl.client_key_share_x25519(group)));
+                }
+                true
+            });
+        }
+    });
+    let shares = extensions(&hello)
+        .into_iter()
+        .find(|(t, _)| *t == 51)
+        .expect("key_share")
+        .1;
+    let mut public = std::collections::HashMap::new();
+    let mut i = 2;
+    while i < shares.len() {
+        let group = u16::from_be_bytes([shares[i], shares[i + 1]]);
+        let len = usize::from(u16::from_be_bytes([shares[i + 2], shares[i + 3]]));
+        let data = &shares[i + 4..i + 4 + len];
+        // X25519MLKEM768: ML-KEM-768 encapsulation key, then the X25519 key.
+        public.insert(group, data[data.len() - 32..].to_vec());
+        i += 4 + len;
+    }
+    let keys = keys.lock().unwrap();
+    assert_eq!(keys.len(), 3);
+    for (group, private) in keys.iter() {
+        match public.get(group) {
+            Some(expected) => {
+                let private = private.expect("x25519 private key");
+                let mut derived = [0u8; 32];
+                unsafe {
+                    crate::ffi::X25519_public_from_private(derived.as_mut_ptr(), private.as_ptr())
+                };
+                assert_eq!(&derived[..], &expected[..], "group {group:#06x}");
+            }
+            None => assert!(private.is_none(), "group {group:#06x}"),
+        }
+    }
+    // Outside a handshake there is nothing to export.
+    assert!(new_ssl().client_key_share_x25519(X25519).is_none());
+}

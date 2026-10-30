@@ -134,6 +134,32 @@ unsafe fn raw_custom_verify_callback(
     }
 }
 
+#[cfg(feature = "client-hello-extensions")]
+pub(super) unsafe extern "C" fn raw_client_hello_session_id<F>(
+    ssl: *mut ffi::SSL,
+    session_id: *mut u8,
+    session_id_len: usize,
+    client_hello: *const u8,
+    client_hello_len: usize,
+    _arg: *mut c_void,
+) -> c_int
+where
+    F: Fn(&mut SslRef, &mut [u8], &[u8]) -> bool + 'static + Sync + Send,
+{
+    // SAFETY: boring provides valid inputs: `session_id` and `client_hello` are
+    // distinct buffers of the given lengths, live for the call.
+    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
+    let session_id = unsafe { std::slice::from_raw_parts_mut(session_id, session_id_len) };
+    let client_hello = unsafe { std::slice::from_raw_parts(client_hello, client_hello_len) };
+
+    let callback = ssl
+        .ex_data(Ssl::cached_ex_index::<Arc<F>>())
+        .expect("BUG: client hello session id callback missing")
+        .clone();
+
+    c_int::from(callback(ssl, session_id, client_hello))
+}
+
 pub(super) unsafe extern "C" fn raw_client_psk<F>(
     ssl_ptr: *mut ffi::SSL,
     hint: *const c_char,
