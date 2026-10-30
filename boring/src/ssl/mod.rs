@@ -3347,6 +3347,29 @@ impl SslRef {
         }
     }
 
+    /// Also accepts these signature algorithms from the server without
+    /// advertising them in signature_algorithms, so the ClientHello does not
+    /// change. For servers that sign with a fixed algorithm whatever the
+    /// client offers (REALITY: Ed25519). The algorithm must still fit the
+    /// certificate key. An empty slice (the default) accepts only advertised
+    /// algorithms.
+    ///
+    /// Requires the `client-hello-extensions` feature.
+    #[cfg(feature = "client-hello-extensions")]
+    #[corresponds(SSL_set_extra_verify_algorithm_prefs)]
+    pub fn set_extra_verify_algorithm_prefs(
+        &mut self,
+        prefs: &[SslSignatureAlgorithm],
+    ) -> Result<(), ErrorStack> {
+        unsafe {
+            cvt(ffi::SSL_set_extra_verify_algorithm_prefs(
+                self.as_ptr(),
+                prefs.as_ptr().cast(),
+                prefs.len(),
+            ))
+        }
+    }
+
     /// The X25519 private key of this client's key share in group `group_id`:
     /// the key itself for X25519 (`0x001d`), the X25519 half for
     /// X25519MLKEM768 (`0x11ec`). Available from the

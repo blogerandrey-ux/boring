@@ -293,3 +293,28 @@ fn client_key_share_x25519_matches_the_key_share() {
     // Outside a handshake there is nothing to export.
     assert!(new_ssl().client_key_share_x25519(X25519).is_none());
 }
+
+/// Extra verify algorithms do not change the advertised list. (Whether one
+/// is accepted can only be seen against a server that signs with an
+/// algorithm the client did not offer, such as REALITY; BoringSSL servers do
+/// not, so that half is covered by the REALITY end-to-end tests of the user
+/// of this API.)
+#[test]
+fn extra_verify_algorithms_are_not_advertised() {
+    let sigalgs = |hello: &[u8]| {
+        extensions(hello)
+            .into_iter()
+            .find(|(t, _)| *t == 13)
+            .expect("signature_algorithms")
+            .1
+    };
+    let plain = client_hello_with(|_| {});
+    let with_extra = client_hello_with(|ssl| {
+        ssl.set_extra_verify_algorithm_prefs(&[SslSignatureAlgorithm::ED25519])
+            .unwrap()
+    });
+    assert_eq!(sigalgs(&with_extra), sigalgs(&plain));
+    assert!(!sigalgs(&plain)
+        .chunks(2)
+        .any(|c| c == 0x0807u16.to_be_bytes()));
+}

@@ -1,0 +1,122 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: blogerandrey-ux <blogerandrey-ux@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 00:00:00 +0000
+Subject: [PATCH] Accept extra server signature algorithms without advertising
+ them
+
+SSL_set_extra_verify_algorithm_prefs lets a client accept signature
+algorithms in the server's CertificateVerify (or ServerKeyExchange) that
+it does not list in signature_algorithms. The advertised list, and so the
+ClientHello, stays unchanged; the algorithm must still match the
+certificate key.
+
+Some servers sign with a fixed algorithm whatever the client offers:
+REALITY servers use a temporary Ed25519 certificate, which Go clients
+accept because they check against every algorithm they support. A
+BoringSSL client that reproduces a browser ClientHello without Ed25519
+needs this to talk to them.
+---
+ include/openssl/prefix_symbols.h |  2 ++
+ include/openssl/ssl.h            | 14 ++++++++++++++
+ ssl/extensions.cc                | 16 +++++++++++++++-
+ ssl/internal.h                   |  5 +++++
+ 4 files changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/include/openssl/prefix_symbols.h b/include/openssl/prefix_symbols.h
+index 3929347..84e8167 100644
+--- a/include/openssl/prefix_symbols.h
++++ b/include/openssl/prefix_symbols.h
+@@ -2398,6 +2398,7 @@
+ #pragma redefine_extname SSL_set_enable_ech_grease BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_enable_ech_grease)
+ #pragma redefine_extname SSL_set_ex_data BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_ex_data)
+ #pragma redefine_extname SSL_set_extension_order BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_extension_order)
++#pragma redefine_extname SSL_set_extra_verify_algorithm_prefs BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_extra_verify_algorithm_prefs)
+ #pragma redefine_extname SSL_set_fd BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_fd)
+ #pragma redefine_extname SSL_set_handshake_hints BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_handshake_hints)
+ #pragma redefine_extname SSL_set_hostflags BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_set_hostflags)
+@@ -5560,6 +5561,7 @@
+ #define SSL_set_enable_ech_grease BORINGSSL_ADD_PREFIX(SSL_set_enable_ech_grease)
+ #define SSL_set_ex_data BORINGSSL_ADD_PREFIX(SSL_set_ex_data)
+ #define SSL_set_extension_order BORINGSSL_ADD_PREFIX(SSL_set_extension_order)
++#define SSL_set_extra_verify_algorithm_prefs BORINGSSL_ADD_PREFIX(SSL_set_extra_verify_algorithm_prefs)
+ #define SSL_set_fd BORINGSSL_ADD_PREFIX(SSL_set_fd)
+ #define SSL_set_handshake_hints BORINGSSL_ADD_PREFIX(SSL_set_handshake_hints)
+ #define SSL_set_hostflags BORINGSSL_ADD_PREFIX(SSL_set_hostflags)
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 7e726e0..2db238e 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -5781,6 +5781,20 @@ OPENSSL_EXPORT int SSL_get_client_key_share_x25519(const SSL *ssl,
+                                                    uint16_t group_id,
+                                                    uint8_t out[32]);
+ 
++// SSL_set_extra_verify_algorithm_prefs configures `ssl`, a client, to also
++// accept the `num_prefs` signature algorithms in `prefs` in the server's
++// CertificateVerify (or ServerKeyExchange), without advertising them in
++// signature_algorithms. The advertised list stays the one from
++// `SSL_CTX_set_verify_algorithm_prefs`. This is for servers known to sign
++// with a fixed algorithm whatever the client offers, such as REALITY servers
++// (Ed25519), when the ClientHello must match another TLS stack exactly. The
++// algorithm must still fit the certificate's key. An empty list (the
++// default) accepts only advertised algorithms. It returns one on success and
++// zero on error.
++OPENSSL_EXPORT int SSL_set_extra_verify_algorithm_prefs(SSL *ssl,
++                                                        const uint16_t *prefs,
++                                                        size_t num_prefs);
++
+ // SSL_max_seal_overhead returns the maximum overhead, in bytes, of sealing a
+ // record with `ssl`.
+ OPENSSL_EXPORT size_t SSL_max_seal_overhead(const SSL *ssl);
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index 1871b2d..f32bc58 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -360,7 +360,12 @@ bool tls12_check_peer_sigalg(const SSL_HANDSHAKE *hs, uint8_t *out_alert,
+   // The peer must have selected an algorithm that is consistent with its public
+   // key, the TLS version, and what we advertised.
+   Span<const uint16_t> sigalgs = tls12_get_verify_sigalgs(hs);
+-  if (std::find(sigalgs.begin(), sigalgs.end(), sigalg) == sigalgs.end() ||
++  Span<const uint16_t> extra;
++  if (!hs->ssl->server && hs->config != nullptr) {
++    extra = hs->config->extra_verify_sigalgs;
++  }
++  if ((std::find(sigalgs.begin(), sigalgs.end(), sigalg) == sigalgs.end() &&
++       std::find(extra.begin(), extra.end(), sigalg) == extra.end()) ||
+       !ssl_pkey_supports_algorithm(hs->ssl, pkey, sigalg, /*is_verify=*/true)) {
+     OPENSSL_PUT_ERROR(SSL, SSL_R_WRONG_SIGNATURE_TYPE);
+     *out_alert = SSL_AD_ILLEGAL_PARAMETER;
+@@ -5552,6 +5557,15 @@ int SSL_early_callback_ctx_extension_get(const SSL_CLIENT_HELLO *client_hello,
+   return 1;
+ }
+ 
++int SSL_set_extra_verify_algorithm_prefs(SSL *ssl, const uint16_t *prefs,
++                                         size_t num_prefs) {
++  auto *ssl_impl = FromOpaque(ssl);
++  if (!ssl_impl->config) {
++    return 0;
++  }
++  return ssl_impl->config->extra_verify_sigalgs.CopyFrom(Span(prefs, num_prefs));
++}
++
+ int SSL_set_extension_order(SSL *ssl, const uint16_t *ext_types,
+                             size_t num_ext_types) {
+   auto *ssl_impl = FromOpaque(ssl);
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 871c26d..cf70a4b 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -3605,6 +3605,11 @@ struct SSL_CONFIG {
+   SSL_client_hello_session_id_cb_func client_hello_session_id_cb = nullptr;
+   void *client_hello_session_id_cb_arg = nullptr;
+ 
++  // extra_verify_sigalgs are signature algorithms a client accepts from the
++  // server without advertising them. See
++  // `SSL_set_extra_verify_algorithm_prefs`.
++  Array<uint16_t> extra_verify_sigalgs;
++
+   // compliance_policy limits the set of ciphers that can be selected when
+   // negotiating a TLS 1.3 connection.
+   enum ssl_compliance_policy_t compliance_policy = ssl_compliance_policy_none;
+-- 
+2.54.0.windows.1
+
